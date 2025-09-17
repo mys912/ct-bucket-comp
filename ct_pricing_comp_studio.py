@@ -133,6 +133,9 @@ col_spec = st.sidebar.text_input("Specialist", "Specialist")
 col_date = st.sidebar.text_input("dateRequested", "dateRequested")
 col_chgd = st.sidebar.text_input("ChargedService", "ChargedService")
 
+st.sidebar.subheader("Optional columns")
+col_company = st.sidebar.text_input("Company (optional)", "Company")
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("Filters")
 ct_only = st.sidebar.checkbox("CT-only (filter non-CT rows)", value=True)
@@ -205,36 +208,46 @@ if isinstance(df, dict):
 df.columns = df.columns.str.strip()
 
 required = [col_case, col_imgs, col_spec, col_date, col_chgd]
+if col_company in df.columns:
+    required.append(col_company)
+
 missing = [c for c in required if c not in df.columns]
 if missing:
     st.error(f"Missing required columns: {missing}")
     st.stop()
 
-df = df[[col_case, col_imgs, col_spec, col_date, col_chgd]].copy()
-df.rename(
-    columns={
-        col_case: "Casenumber",
-        col_imgs: "TotalImages",
-        col_spec: "Specialist",
-        col_date: "dateRequested",
-        col_chgd: "ChargedService",
-    },
-    inplace=True,
-)
+# Keep & rename (include Company if present)
+base_cols = [col_case, col_imgs, col_spec, col_date, col_chgd]
+if col_company in df.columns:
+    base_cols.append(col_company)
+df = df[base_cols].copy()
 
+rename_map = {
+    col_case: "Casenumber",
+    col_imgs: "TotalImages",
+    col_spec: "Specialist",
+    col_date: "dateRequested",
+    col_chgd: "ChargedService",
+}
+if col_company in df.columns:
+    rename_map[col_company] = "Company"
+df.rename(columns=rename_map, inplace=True)
+
+# Parse types & clean
 df["dateRequested"] = pd.to_datetime(df["dateRequested"], errors="coerce")
 df["TotalImages"] = pd.to_numeric(df["TotalImages"], errors="coerce")
 df["ChargedService_clean"] = df["ChargedService"].apply(normalize_ct)
 
+# Date filter
 if use_date_filter:
     if pd.notna(pd.to_datetime(date_min, errors="coerce")):
         df = df[df["dateRequested"] >= pd.to_datetime(date_min)]
     if pd.notna(pd.to_datetime(date_max, errors="coerce")):
         df = df[df["dateRequested"] <= pd.to_datetime(date_max)]
 
+# CT-only & drop critical missing
 if ct_only:
     df = df[df["ChargedService_clean"].notna()].copy()
-
 df = df.dropna(subset=["TotalImages", "dateRequested", "ChargedService_clean"]).copy()
 
 n_rows = len(df)
@@ -272,7 +285,7 @@ st.sidebar.subheader("Bucket Prices ($) & Points (used when 'By bucket' comp mod
 bucket_price_map = {}
 bucket_points_map = {}
 
-# Seed simple ascending defaults if user hasn't set any yet
+# Seed ascending defaults
 base_price, price_step = 200.0, 150.0 / max(1, n_buckets - 1)
 base_pts, pts_step = 3.5, 5.5 / max(1, n_buckets - 1)
 
@@ -387,10 +400,48 @@ if show_specialist_comp:
           .sort_values("CompDelta", ascending=False)
     )
     st.subheader("Specialist Compensation — Δ ($) by Specialist")
-    fig_spec = px.bar(spec.reset_index(), x="Specialist", y="CompDelta",
-                      title="Compensation Δ (Bucket – Baseline) per Specialist")
+    fig_spec = px.bar(
+        spec.reset_index(),
+        x="Specialist", y="CompDelta",
+        title="Compensation Δ (Bucket – Baseline) per Specialist"
+    )
     st.plotly_chart(fig_spec, use_container_width=True)
     st.dataframe(spec)
+
+# =========================
+# Client cost deltas (by Company)
+# =========================
+if "Company" in df.columns:
+    st.markdown("---")
+    st.subheader("Clinic Cost — Δ ($) by Company (Bucket billing – Baseline billing)")
+
+    client = (
+        df.groupby("Company")[["BaselineRevenue", "BucketRevenue"]].sum()
+          .assign(CostDelta=lambda x: x["BucketRevenue"] - x["BaselineRevenue"])
+          .sort_values("CostDelta", ascending=False)
+    )
+
+    top_n = st.slider(
+        "Show top N companies by absolute change",
+        min_value=5, max_value=50,
+        value=min(20, len(client)), step=1
+    )
+
+    client_sorted_abs = client.reindex(client["CostDelta"].abs().sort_values(ascending=False).index)
+    client_top = client_sorted_abs.head(top_n)
+
+    fig_client = px.bar(
+        client_top.reset_index(),
+        x="Company",
+        y="CostDelta",
+        title="Clinic Cost Δ (Bucket – Baseline) per Company",
+        labels={"CostDelta": "Δ Cost ($)", "Company": "Company"}
+    )
+    st.plotly_chart(fig_client, use_container_width=True)
+
+    st.dataframe(client)
+else:
+    st.info("No 'Company' column detected. Add it in the sidebar mapping if available.")
 
 # =========================
 # Export
@@ -405,6 +456,9 @@ ledger_cols = [
     "BaselinePoints","BucketPoints","BaselineComp","BucketComp","CompDelta",
     "BaselineMargin","BucketMargin","MarginDelta"
 ]
+if "Company" in df.columns:
+    ledger_cols.insert(1, "Company")
+
 ledger = df[ledger_cols].copy()
 
 st.download_button(
